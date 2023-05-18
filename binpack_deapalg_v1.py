@@ -1,7 +1,11 @@
 import random
-from deap import base, creator, tools
+from deap import base, creator, tools, algorithms
 import numpy as np
-
+import timeit
+from pathos.multiprocessing import ProcessingPool as Pool
+from matplotlib import pyplot as plt
+import time
+import datetime
 from itertools import repeat
 
 try:
@@ -10,12 +14,12 @@ except ImportError:
     from collections import Sequence
 
 # 物品数量和物品大小
-num_items = 10
-item_sizes = [1, 5, 5, 6, 3, 2, 4, 7, 9, 8]
+
+item_sizes = [1, 5, 5, 6, 3, 2, 4, 7, 9, 8, 2, 5, 3, 4, 9, 7, 5, 6, 3]
+num_items = len(item_sizes)
 
 # 容器容量
-bin_capacity = 10
-
+bin_capacity = 50
 
 # 初始化函数
 def binpacking_init(item_sizes, bin_cap):
@@ -42,7 +46,21 @@ def binpacking_init(item_sizes, bin_cap):
     return init_ind.tolist()
 
 
-# 评估函数
+
+def bin_count(individual):
+    box_mapping = {}
+    new_result = []
+
+    # 遍历结果列表中的每个值
+    for value in individual:
+        # 如果值尚未分配新编号，则将其添加到字典中，并将当前字典长度作为新编号
+        if value not in box_mapping:
+            box_mapping[value] = len(box_mapping)
+        # 将新编号添加到新结果列表中
+        new_result.append(box_mapping[value])
+    bin_num = max(new_result) + 1
+    return bin_num
+
 def binpacking_fitness(individual, item_sizes, bin_cap):
     '''
         在初始化、交叉和变异操作时，应保证解的可行性，因此，评估函数我们用使用的箱子个数和空闲空间大小来表示
@@ -53,16 +71,20 @@ def binpacking_fitness(individual, item_sizes, bin_cap):
     beta = 1 - alpha
 
     # 获取一共用了多少个箱子
-    bin_num = np.max(individual)
+    # this_bin_cap = bin_cap
+    bin_num = bin_count(individual)
     # 计算空闲空间大小
     idle_size = 0
-    for bin_idx in range(bin_num + 1):
-        idle_size += (bin_cap - item_sizes[individual == bin_idx])
+    for bin_idx in range(max(individual) + 1):
+        bin_remain = bin_cap
+        for idx, bin in enumerate(individual):
+            if bin == bin_idx:
+                bin_remain -= item_sizes[idx]
+        idle_size += bin_remain
 
     fitness = alpha * bin_num + beta * idle_size
 
     return fitness,
-
 
 def binpacking_constraint_check(individual, item_sizes, bin_cap):
     '''
@@ -78,7 +100,7 @@ def binpacking_constraint_check(individual, item_sizes, bin_cap):
     '''
     # 检查个体是否合规
     bin_num = max(individual) + 1
-    #individual = np.array(individual)
+    # individual = np.array(individual)
     item_sizes = np.array(item_sizes)
     for bin_idx in range(bin_num):  # 遍历所有箱子
         item_in_bin = item_sizes[individual == bin_idx]  # 计算箱子bin_idx中所有物品
@@ -103,40 +125,27 @@ def binpacking_constraint_check(individual, item_sizes, bin_cap):
             if sum_size_in_bin <= bin_cap:  # 直到满足约束条件
                 break
     return individual
-def binpacking_constraint_check_2(individual, item_sizes, bin_cap):
-    bin_loads = [0] * (max(individual) + 1)
 
-    for item, bin_idx in enumerate(individual): #bin_idx: 箱子下标
-        bin_loads[bin_idx] += item_sizes[item]
+def cxTwoPointCopy(ind1, ind2):
+    size = len(ind1)
+    cxpoint1 = random.randint(1, size)
+    cxpoint2 = random.randint(1, size - 1)
+    if cxpoint2 >= cxpoint1:
+        cxpoint2 += 1
+    else:  # Swap the two cx points
+        cxpoint1, cxpoint2 = cxpoint2, cxpoint1
 
-    for bin_idx, load in enumerate(bin_loads): #对于每一个箱子
-        if load > bin_cap: #如果溢出
-            # 将溢出的箱子中的物品移到新的箱子中
-            overfilled_items = [i for i, b in enumerate(individual) if b == bin_idx]  #找到溢出的物品的下标
-            individual[overfilled_items.pop()] = len(bin_loads)  # 创建一个新的箱子
+    ind1[cxpoint1:cxpoint2], ind2[cxpoint1:cxpoint2] \
+        = ind2[cxpoint1:cxpoint2].copy(), ind1[cxpoint1:cxpoint2].copy()
 
-            while overfilled_items:
-                item_to_move = overfilled_items.pop()
-                found_bin = False
-                for b_idx, load in enumerate(bin_loads):
-                    if load + item_sizes[item_to_move] <= bin_cap:
-                        individual[item_to_move] = b_idx
-                        bin_loads[b_idx] += item_sizes[item_to_move]
-                        found_bin = True
-                        break
-
-                if not found_bin:
-                    individual[item_to_move] = len(bin_loads)
-                    bin_loads.append(item_sizes[item_to_move])
-
-    return individual
+    return ind1, ind2
 
 
 def binpacking_cxTwoPoint(ind1, ind2, item_sizes, bin_cap):
     '''
         交叉算子-两点交叉
     '''
-    ind1, ind2 = tools.cxTwoPoint(ind1, ind2)
+    ind1, ind2 = cxTwoPointCopy(ind1, ind2)
     ind1 = binpacking_constraint_check(ind1, item_sizes, bin_cap)
     ind2 = binpacking_constraint_check(ind2, item_sizes, bin_cap)
 
@@ -147,26 +156,9 @@ def binpacking_mutUniformInt(individual, indpb, item_sizes, bin_cap):
     '''
         变异算子
     '''
-    #his_individual = tools.mutUniformInt(individual, low=min(item_sizes), up=max(item_sizes), indpb= 1)
-    low = min(item_sizes)
-    up = max(item_sizes)
-    size = len(individual)
-    if not isinstance(low, Sequence):
-        low = repeat(low, size)
-    elif len(low) < size:
-        raise IndexError("low must be at least the size of individual: %d < %d" % (len(low), size))
-    if not isinstance(up, Sequence):
-        up = repeat(up, size)
-    elif len(up) < size:
-        raise IndexError("up must be at least the size of individual: %d < %d" % (len(up), size))
-
-    for i, xl, xu in zip(range(size), low, up):
-        if random.random() < indpb:
-            individual[i] = random.randint(xl, xu)
-
+    tools.mutUniformInt(individual, low=min(item_sizes), up=max(item_sizes), indpb=indpb)
     this_individual = binpacking_constraint_check(individual, item_sizes, bin_cap)
-    bins_state("变异算子", item_sizes, individual)
-    return this_individual
+    return this_individual,
 
 
 def binpacking_selTournament(individuals, k, tournsize, fit_attr="fitness"):
@@ -191,63 +183,48 @@ def bins_state(info, item_sizes, ind, stop=False):
     if stop:
         a = input()
 
-
-# 创建适应度函数和个体
 creator.create("FitnessMin", base.Fitness, weights=(-1.0,))
-creator.create("Individual", list, fitness=creator.FitnessMin)
+creator.create("Individual", np.ndarray, fitness=creator.FitnessMin)
 
 toolbox = base.Toolbox()
 
-# 初始化个体
-toolbox.register("initalize", binpacking_init, item_sizes=item_sizes, bin_cap=bin_capacity)
-toolbox.register("individual", tools.initIterate, creator.Individual, toolbox.initalize)
+# 注册
+toolbox.register("initialize", binpacking_init, item_sizes=item_sizes, bin_cap=bin_capacity)
+toolbox.register("individual", tools.initIterate, creator.Individual, toolbox.initialize)
 toolbox.register("population", tools.initRepeat, list, toolbox.individual)
 toolbox.register("evaluate", binpacking_fitness, item_sizes=item_sizes, bin_cap=bin_capacity)
 toolbox.register("mate", binpacking_cxTwoPoint, item_sizes=item_sizes, bin_cap=bin_capacity)
 toolbox.register("mutate", binpacking_mutUniformInt, indpb=0.1, item_sizes=item_sizes, bin_cap=bin_capacity)
 toolbox.register("select", binpacking_selTournament, tournsize=3)
 
-# 遗传算法参数
+
 pop_size = 100
-num_generations = 50
+num_generations = 1000
 cxpb = 0.5
 mutpb = 0.5
 
 # 初始化种群
 pop = toolbox.population(n=pop_size)
-for i, ind in enumerate(pop):
-    print(f"Individual {i + 1}: fitness.valid = {ind.fitness.valid}")
-# 运行遗传算法
-for gen in range(num_generations):
-    offspring = toolbox.select(pop, len(pop))
-    offspring = list(offspring)
-    #print("第 %s 轮进化：" %(gen))
-    # 交叉操作
-    for child1, child2 in zip(offspring[::2], offspring[1::2]):
-        if random.random() < cxpb:
-            toolbox.mate(child1, child2)
-            del child1.fitness.values
-            del child2.fitness.values
 
-    # 突变操作
-    for mutant in offspring:
-        if random.random() < mutpb:
-            bins_state("变异前：", item_sizes, mutant)
-            toolbox.mutate(mutant)
-            bins_state("变异后：", item_sizes, mutant)
-            del mutant.fitness.values
+if __name__ == '__main__':
+    # 并行计算Fitness，目前用不到，速度反而显著降低
+    # pool = Pool(16)
+    # toolbox.register("map", pool.map)
 
-    # 评估新生成的个体
-    for ind in offspring:
-        if not ind.fitness.valid:
-            ind.fitness.values = toolbox.evaluate(ind)
+    # 添加时间戳
+    start_time = timeit.default_timer()
+    # 运行遗传算法
+    hof = tools.HallOfFame(1)  # maxSize
+    resultPop, logbook = algorithms.eaSimple(pop, toolbox, cxpb=0.5, mutpb=0.5, ngen=num_generations, halloffame=hof)
+    #获得最优
+    print(hof[0].fitness.values)
+    end_time = timeit.default_timer()
+    execution_time = end_time - start_time
+    print(f"Executed the script in {execution_time} seconds")
 
-    # 更新种群
-    pop[:] = offspring
+    best_ind = tools.selBest(pop, 1)[0]
+    Best_fitness = best_ind.fitness.values
+    print("Best fitness: ", Best_fitness)
+    bins_state("Bin state", item_sizes, best_ind)
 
-# 输出结果
-best_ind = tools.selBest(pop, 1)[0]
-Best_fitness = best_ind.fitness.values[0]
 
-print("Best fitness: ", Best_fitness)
-bins_state("Bin state", item_sizes, best_ind)
